@@ -1,0 +1,161 @@
+default:
+  tags:
+    - "docker"
+
+image: busybox:latest
+
+stages:
+  - build
+  - test
+  - deploy
+  - stop
+  - stop previous jobs
+
+variables:
+  IMAGE_TAG: $CI_COMMIT_BRANCH-$CI_COMMIT_SHORT_SHA
+
+include:
+  - local: local-tests.gitlab-ci.yml
+  - remote: "https://gitlab.com/Nikitayrf/test/-/raw/main/remote-tests.gitlab-ci.yml"
+
+cache:
+  key:
+    files:
+      - composer.lock
+  paths:
+    - vendor/
+
+before_script:
+  - echo "Before script section"
+  - echo "For example you might run an update here or install a build dependency"
+  - echo "Or perhaps you might print out some debugging details"
+
+after_script:
+  - echo "After script section"
+  - echo "For example you might do some cleanup here"
+
+build1:
+  stage: build
+  script:
+    - echo "Do your build here"
+    - echo one >> house.txt
+    - echo exeption >> hello.txt
+    - mkdir -p vendor/
+    - echo "build" > vendor/hello.txt
+  artifacts:
+    paths:
+      - house.txt
+      - hello.txt
+    expire_in: 30 days
+
+docker build:
+  image: docker:latest
+  stage: build
+  services:
+    - docker:dind
+  script:
+    - docker login -u $GITLAB_CI_USER -p $GITLAB_CI_PASSWORD $CI_REGISTRY
+    - echo $GITLAB_CI_USER $GITLAB_CI_PASSWORD $CI_REGISTRY $CI_REGISTRY_IMAGE:$IMAGE_TAG
+    - docker build -t $CI_REGISTRY_IMAGE:$IMAGE_TAG .
+    - docker push $CI_REGISTRY_IMAGE:$IMAGE_TAG
+
+test1:
+  stage: test
+  script:
+    - echo "Do a test here"
+    - echo "For example run a test suite"
+    # - grep exeption hello.txt
+    # - sleep 60
+    - cat vendor/hello.txt
+
+test2:
+  stage: test
+  script:
+    - echo "Do another parallel test here"
+    - echo "For example run a lint test"
+    - grep one house.txt
+
+test3:
+  stage: test
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker run -d --name my-container-2024-04-12 $CI_REGISTRY_IMAGE:$IMAGE_TAG
+    # - sleep 5
+    - docker ps -a
+    - docker search my-container-2024-04-12
+
+deploy to preprod:
+  stage: deploy
+  variables:
+    MY_LOGIN: login_preprod
+  script:
+    - echo "Do you deploy here to ${MY_LOGIN}"
+    - echo "${MY_PASSWORD}"
+  only:
+    - main
+  environment:
+    name: preprod
+    on_stop: stop to preprod
+    auto_stop_in: 1 day
+
+stop to preprod:
+  stage: stop
+  variables:
+    MY_LOGIN: login_preprod
+  script:
+    - echo "STOP ${MY_LOGIN}"
+  only:
+    - main
+  when: manual
+  environment:
+    name: preprod
+    action: stop
+
+deploy to production:
+  stage: deploy
+  variables:
+    MY_LOGIN: login_production
+  script:
+    - echo "Do you deploy here to ${MY_LOGIN}"
+    - echo "${MY_PASSWORD}"
+  only:
+    - main
+  when: manual
+  environment:
+    name: production
+
+# ------- Cancel -------
+cancel:
+  stage: stop previous jobs
+  image: everpeace/curl-jq
+  script:
+    - |
+      if [ "$CI_COMMIT_REF_NAME" == "main" ]
+        then
+          (
+            echo "Cancel old pipelines from the same branch except last"
+            OLD_PIPELINES=$( curl -s -H "PRIVATE-TOKEN: $RUNNER_TOKEN" "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/pipelines?ref=${CI_COMMIT_REF_NAME}&status=running" \
+                  | jq '.[] | .id' | tail -n +2 )
+                  for pipeline in ${OLD_PIPELINES}; \
+                      do echo "Killing ${pipeline}" && \
+                        curl -s --request POST -H "PRIVATE-TOKEN: ${RUNNER_TOKEN}" "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/pipelines/${pipeline}/cancel"; done
+          ) || echo "Canceling old pipelines (${OLD_PIPELINES}) failed"
+      fi
+
+pages:
+  stage: deploy
+  script:
+    - mkdir -p public
+    - cp house.txt public/index.html
+    - cp hello.txt public/
+    - echo 404 >> public/404.html
+  artifacts:
+    paths:
+      - public
+    exclude:
+      # - public/hello.txt
+      - public/404.html
+  only:
+    - main
